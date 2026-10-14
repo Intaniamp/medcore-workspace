@@ -1,0 +1,27 @@
+
+{
+  "event_id": "evt-77a82c91-9921-4f92-b491-112233445566",
+  "event_name": "ConsultationCompletedEvent",
+  "occurred_at": "2026-10-12T14:30:00Z",
+  "producer": "appointment-service",
+  "payload": {
+    "appointment_id": "b1111111-1111-1111-1111-111111111111",
+    "patient_id": "a0000000-0000-0000-0000-000000000001",
+    "doctor_id": "b0000000-0000-0000-0000-000000000001",
+    "consultation_status": "COMPLETED",
+    "prescription": {
+      "prescription_id": "rx-2026-9901",
+      "items": [
+        {
+          "drug_code": "MED-AMX-500",
+          "quantity": 10,
+          "dosage": "3x1 sehari sesudah makan"
+        }
+      ]
+    },
+    "billing_summary": {
+      "consultation_fee": 150000.0,
+      "triage_urgency": "GREEN"
+    }
+  }
+}
