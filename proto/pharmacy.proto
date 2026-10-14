@@ -1,0 +1,43 @@
+syntax = "proto3"; 
+
+package medcore.pharmacy.v1; 
+
+option go_package = "services/pharmacy-service/pb;pharmacypb"; 
+
+service PharmacyService { 
+    // RPC Unary untuk verifikasi ketersediaan stok obat oleh layanan klinik 
+    rpc CheckDrugAvailability (CheckDrugRequest) returns (CheckDrugResponse); 
+
+    // RPC Unary untuk mengunci stok sementara saat resep dibuat 
+    rpc ReservePrescriptionStock (ReserveStockRequest) returns (ReserveStockResponse); 
+} 
+
+message CheckDrugRequest { 
+    string drug_code = 1; 
+    int32 quantity_needed = 2; 
+} 
+
+message CheckDrugResponse { 
+    string drug_code = 1; 
+    bool is_available = 2; 
+    int32 current_stock = 3; 
+    double unit_price = 4; 
+    string message = 5; 
+} 
+
+message StockItem { 
+    string drug_code = 1; 
+    int32 quantity = 2; 
+} 
+
+message ReserveStockRequest { 
+    string prescription_id = 1; 
+    string appointment_id = 2; 
+    repeated StockItem items = 3; 
+} 
+
+message ReserveStockResponse { 
+    bool reservation_success = 1; 
+    string transaction_reference = 2; 
+    string error_detail = 3; 
+} 
