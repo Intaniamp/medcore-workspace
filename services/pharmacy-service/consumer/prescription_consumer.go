@@ -3,6 +3,7 @@ package consumer
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
@@ -32,11 +33,20 @@ type ProcessedEventRecord struct {
 }
 
 type StockExhaustedEvent struct {
-	EventName     string `json:"event_name"`
-	AppointmentID string `json:"appointment_id"`
-	DrugCode      string `json:"drug_code"`
-	Reason        string `json:"reason"`
-	OccurredAt    string `json:"occurred_at"`
+	EventID    string                `json:"event_id"`
+	EventName  string                `json:"event_name"`
+	OccurredAt string                `json:"occurred_at"`
+	Producer   string                `json:"producer"`
+	Payload    StockExhaustedPayload `json:"payload"`
+}
+
+type StockExhaustedPayload struct {
+	AppointmentID     string `json:"appointment_id"`
+	PrescriptionID    string `json:"prescription_id"`
+	DrugCode          string `json:"drug_code"`
+	RequestedQuantity int    `json:"requested_quantity"`
+	AvailableQuantity int    `json:"available_quantity"`
+	Reason            string `json:"reason"`
 }
 
 func StartPrescriptionConsumer(amqpURI string, mongoClient *mongo.Client) {
@@ -156,22 +166,37 @@ func ProcessPrescriptionWithDeduplication(ctx context.Context, mongoClient *mong
 	// 2. Eksekusi Logika Bisnis & Skenario Kompensasi Stok Kosong (Langkah 2.4)
 	log.Printf("[Business Logic] Memproses stok resep untuk Event ID: %s", evt.EventID)
 
+	stockExhausted := false
 	for _, item := range evt.Payload.Prescription.Items {
 		if item.DrugCode == "MED-AMX-500" {
+			stockExhausted = true
 			// Simulasi stok fisik MED-AMX-500 di gudang kosong (0)
 			log.Printf("[Pharmacy Warning] Stok fisik obat %s di gudang KOSONG (0)!", item.DrugCode)
 			log.Printf("[Compensation Publisher] Menerbitkan event balasan 'medcore.event.pharmacy.stock.exhausted' ke Exchange...")
 
 			compEvent := StockExhaustedEvent{
-				EventName:     "medcore.event.pharmacy.stock.exhausted",
-				AppointmentID: evt.Payload.AppointmentID,
-				DrugCode:      item.DrugCode,
-				Reason:        "STOCK_EXHAUSTED_IN_WAREHOUSE",
-				OccurredAt:    time.Now().UTC().Format(time.RFC3339),
+				EventID:    fmt.Sprintf("%s.stock-exhausted.%s", evt.EventID, item.DrugCode),
+				EventName:  "medcore.event.pharmacy.stock.exhausted",
+				OccurredAt: time.Now().UTC().Format(time.RFC3339),
+				Producer:   "pharmacy-service",
+				Payload: StockExhaustedPayload{
+					AppointmentID:     evt.Payload.AppointmentID,
+					PrescriptionID:    evt.Payload.Prescription.PrescriptionID,
+					DrugCode:          item.DrugCode,
+					RequestedQuantity: item.Quantity,
+					AvailableQuantity: 0,
+					Reason:            "STOCK_EXHAUSTED_IN_WAREHOUSE",
+				},
 			}
 
-			body, _ := json.Marshal(compEvent)
-			errPub := ch.PublishWithContext(
+			body, err := json.Marshal(compEvent)
+			if err != nil {
+				log.Printf("[Error] Gagal serialisasi event kompensasi: %v. Requeue pesan.", err)
+				d.Nack(false, true)
+				return
+			}
+
+			err = ch.PublishWithContext(
 				ctx,
 				"medcore.clinical.events",                // Exchange tujuan
 				"medcore.event.pharmacy.stock.exhausted", // Routing Key kompensasi
@@ -180,11 +205,16 @@ func ProcessPrescriptionWithDeduplication(ctx context.Context, mongoClient *mong
 				amqp.Publishing{
 					DeliveryMode: amqp.Persistent,
 					ContentType:  "application/json",
+					MessageId:    compEvent.EventID,
+					Type:         compEvent.EventName,
+					Timestamp:    time.Now().UTC(),
 					Body:         body,
 				},
 			)
-			if errPub != nil {
-				log.Printf("[Error] Gagal menerbitkan event kompensasi: %v", errPub)
+			if err != nil {
+				log.Printf("[Error] Gagal menerbitkan event kompensasi: %v. Requeue pesan.", err)
+				d.Nack(false, true)
+				return
 			} else {
 				log.Printf("[Compensation Publisher] Berhasil menerbitkan event kompensasi untuk Appointment ID: %s", evt.Payload.AppointmentID)
 			}
@@ -192,10 +222,15 @@ func ProcessPrescriptionWithDeduplication(ctx context.Context, mongoClient *mong
 	}
 
 	// 3. Catat Event ID ke database riwayat proses (Atomic Insert)
+	status := "PROCESSED"
+	if stockExhausted {
+		status = "COMPENSATED_OUT_OF_STOCK"
+	}
+
 	_, err = eventColl.InsertOne(ctx, ProcessedEventRecord{
 		EventID:     evt.EventID,
 		ProcessedAt: time.Now(),
-		Status:      "COMPENSATED_OUT_OF_STOCK",
+		Status:      status,
 	})
 	if err != nil {
 		log.Printf("[Error] Gagal mencatat deduplikasi: %v. Requeue pesan.", err)
