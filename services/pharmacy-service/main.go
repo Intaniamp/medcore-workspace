@@ -11,6 +11,8 @@ import (
 
 	pb "pharmacy-service/pb"
 
+	"pharmacy-service/consumer"
+
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -71,6 +73,9 @@ func (s *server) CheckDrugAvailability(ctx context.Context, req *pb.CheckDrugReq
 }
 
 func main() {
+	amqpURI := "amqp://admin_medcore:SecuredPassRabbit2026!@localhost:5672/medcore_vhost"
+	consumer.StartPrescriptionConsumer(amqpURI)
+
 	// Koneksi ke MongoDB kontainer
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
