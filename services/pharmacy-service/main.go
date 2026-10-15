@@ -73,8 +73,7 @@ func (s *server) CheckDrugAvailability(ctx context.Context, req *pb.CheckDrugReq
 }
 
 func main() {
-	amqpURI := "amqp://admin_medcore:SecuredPassRabbit2026!@localhost:5672/medcore_vhost"
-	consumer.StartPrescriptionConsumer(amqpURI)
+	amqpURI := "amqp://admin_medcore:SecuredPassRabbit2026!@localhost:5672/%2Fmedcore_vhost"
 
 	// Koneksi ke MongoDB kontainer
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -87,6 +86,7 @@ func main() {
 		log.Fatalf("Gagal terhubung ke MongoDB: %v", err)
 	}
 
+	consumer.StartPrescriptionConsumer(amqpURI, client)
 	go startRESTServer(client)
 
 	lis, err := net.Listen("tcp", ":50051")
