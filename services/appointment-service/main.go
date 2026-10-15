@@ -2,29 +2,29 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
-	"os"
 	"time"
 
-	"github.com/google/uuid"
-
 	"appointment-service/publisher"
+
+	"github.com/google/uuid"
 )
 
 func main() {
-	amqpURI := os.Getenv("AMQP_URI")
-	if amqpURI == "" {
-		amqpURI = "amqp://admin_medcore:SecuredPassRabbit2026!@localhost:5672/medcore_vhost"
-	}
+	amqpURI := "amqp://admin_medcore:SecuredPassRabbit2026!@localhost:5672/medcore_vhost"
 
-	eventPublisher, err := publisher.NewEventPublisher(amqpURI)
+	log.Println("[Appointment Service] Menginisialisasi koneksi messaging...")
+
+	pub, err := publisher.NewEventPublisher(amqpURI)
 	if err != nil {
-		log.Fatalf("Gagal membuat publisher: %v", err)
+		log.Fatalf("Inisialisasi publisher gagal: %v", err)
 	}
-	defer eventPublisher.Close()
+	defer pub.Close()
 
-	event := publisher.ConsultationCompletedEvent{
-		EventID:    uuid.NewString(),
+	// Simulasi event ketika konsultasi selesai
+	simulatedEvent := publisher.ConsultationCompletedEvent{
+		EventID:    fmt.Sprintf("evt-%s", uuid.New().String()),
 		EventName:  "ConsultationCompletedEvent",
 		OccurredAt: time.Now().UTC().Format(time.RFC3339),
 		Producer:   "appointment-service",
@@ -34,7 +34,7 @@ func main() {
 			DoctorID:           "b0000000-0000-0000-0000-000000000001",
 			ConsultationStatus: "COMPLETED",
 			Prescription: publisher.PrescriptionData{
-				PrescriptionID: "rx-2026-9901",
+				PrescriptionID: "RX-2026-9901",
 				Items: []publisher.PrescriptionItem{
 					{
 						DrugCode: "MED-AMX-500",
@@ -50,12 +50,14 @@ func main() {
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := eventPublisher.PublishConsultationCompleted(ctx, event); err != nil {
-		log.Fatalf("Gagal mengirim event konsultasi: %v", err)
+	log.Println("[Appointment Service] Menerbitkan event konsultasi ke RabbitMQ...")
+
+	if err := pub.PublishConsultationCompleted(ctx, simulatedEvent); err != nil {
+		log.Fatalf("Gagal mempublikasikan event: %v", err)
 	}
 
-	log.Println("Pengiriman event konsultasi selesai.")
+	log.Println("[Appointment Service] Proses publikasi selesai sempurna.")
 }
