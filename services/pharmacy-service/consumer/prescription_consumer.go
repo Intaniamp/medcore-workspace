@@ -1,10 +1,14 @@
 package consumer
 
 import (
+	"context"
 	"encoding/json"
 	"log"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 type EventEnvelope struct {
@@ -21,7 +25,21 @@ type EventEnvelope struct {
 	} `json:"payload"`
 }
 
-func StartPrescriptionConsumer(amqpURI string) {
+type ProcessedEventRecord struct {
+	EventID     string    `bson:"event_id"`
+	ProcessedAt time.Time `bson:"processed_at"`
+	Status      string    `bson:"status"`
+}
+
+type StockExhaustedEvent struct {
+	EventName     string `json:"event_name"`
+	AppointmentID string `json:"appointment_id"`
+	DrugCode      string `json:"drug_code"`
+	Reason        string `json:"reason"`
+	OccurredAt    string `json:"occurred_at"`
+}
+
+func StartPrescriptionConsumer(amqpURI string, mongoClient *mongo.Client) {
 	conn, err := amqp.Dial(amqpURI)
 	if err != nil {
 		log.Fatalf("[Pharmacy Consumer] Gagal koneksi broker: %v", err)
@@ -34,25 +52,39 @@ func StartPrescriptionConsumer(amqpURI string) {
 	}
 	defer ch.Close()
 
-	// 1. Deklarasikan Queue durable khusus Farmasi
-	q, err := ch.QueueDeclare(
-		"pharmacy.prescription.order.q", // Nama Queue
-		true,                            // Durable
-		false,                           // Auto-delete
-		false,                           // Exclusive
-		false,                           // No-wait
-		nil,                             // Arguments
+	err = ch.ExchangeDeclare(
+		"medcore.clinical.events",
+		"topic",
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		log.Fatalf("[Pharmacy Consumer] Gagal deklarasi exchange: %v", err)
+	}
 
+	args := amqp.Table{
+		"x-dead-letter-exchange": "medcore.deadletter.exchange",
+	}
+
+	q, err := ch.QueueDeclare(
+		"pharmacy.prescription.order.q",
+		true,
+		false,
+		false,
+		false,
+		args,
 	)
 	if err != nil {
 		log.Fatalf("[Pharmacy Consumer] Gagal deklarasi queue: %v", err)
 	}
 
-	// 2. Ikat Queue ke Exchange dengan Binding Pattern
 	err = ch.QueueBind(
 		q.Name,
-		"clinical.consultation.*", // Routing pattern
-		"medcore.clinical.events", // Exchange asal
+		"clinical.consultation.*",
+		"medcore.clinical.events",
 		false,
 		nil,
 	)
@@ -60,15 +92,15 @@ func StartPrescriptionConsumer(amqpURI string) {
 		log.Fatalf("[Pharmacy Consumer] Gagal binding queue: %v", err)
 	}
 
-	// 3. Pasang Prefetch Count (QoS = 1 agar beban seimbang)
 	err = ch.Qos(1, 0, false)
 	if err != nil {
 		log.Fatalf("[Pharmacy Consumer] Gagal set QoS: %v", err)
 	}
+
 	msgs, err := ch.Consume(
 		q.Name,
-		"pharmacy-worker", // Consumer tag
-		false,             // autoAck = FALSE (Wajib Manual Ack!)
+		"pharmacy-worker",
+		false,
 		false,
 		false,
 		false,
@@ -81,31 +113,96 @@ func StartPrescriptionConsumer(amqpURI string) {
 	log.Printf("[Pharmacy Consumer] Menunggu pesan resep pada antrean: %s", q.Name)
 
 	forever := make(chan bool)
+
 	go func() {
 		for d := range msgs {
-			var evt EventEnvelope
-			if err := json.Unmarshal(d.Body, &evt); err != nil {
-				log.Printf("[Pharmacy Consumer] Format pesan tidak valid, NACK tanpa requeue: %v", err)
-				d.Nack(false, false)
-				continue
-			}
-
-			log.Println("---------------------------------------------------------")
-			log.Printf("[Pharmacy Consumer] Menerima Resep Baru!")
-			log.Printf(" Event ID        : %s", evt.EventID)
-			log.Printf(" Appointment ID  : %s", evt.Payload.AppointmentID)
-			log.Printf(" Prescription ID : %s", evt.Payload.Prescription.PrescriptionID)
-			for _, item := range evt.Payload.Prescription.Items {
-				log.Printf(" -> Item: %s | Qty: %d", item.DrugCode, item.Quantity)
-			}
-
-			log.Println("---------------------------------------------------------")
-
-			// Konfirmasi ke RabbitMQ bahwa pesan selesai diproses
-			d.Ack(false)
-			log.Println("[Pharmacy Consumer] Pesan berhasil di-ACK.")
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			// Kirimkan ch (channel) agar fungsi ini bisa menerbitkan event balasan
+			ProcessPrescriptionWithDeduplication(ctx, mongoClient, ch, d)
+			cancel()
 		}
 	}()
 
 	<-forever
+}
+
+func ProcessPrescriptionWithDeduplication(ctx context.Context, mongoClient *mongo.Client, ch *amqp.Channel, d amqp.Delivery) {
+	var evt EventEnvelope
+	if err := json.Unmarshal(d.Body, &evt); err != nil {
+		d.Nack(false, false)
+		return
+	}
+
+	// Cek Poison Message (Langkah 2.2)
+	for _, item := range evt.Payload.Prescription.Items {
+		if item.Quantity <= 0 {
+			log.Printf("[Pharmacy Consumer] Terdeteksi Poison Message! Kuantitas tidak valid: %d. Mengirim NACK ke DLQ.", item.Quantity)
+			d.Nack(false, false)
+			return
+		}
+	}
+
+	eventColl := mongoClient.Database("medcore_pharmacy_db").Collection("processed_events")
+
+	// 1. Cek apakah Event ID sudah pernah diproses sebelumnya (Langkah 2.3)
+	var existing ProcessedEventRecord
+	err := eventColl.FindOne(ctx, bson.M{"event_id": evt.EventID}).Decode(&existing)
+	if err == nil {
+		log.Printf("[Deduplication Guard] Event %s terdeteksi duplikat! Melewati eksekusi bisnis dan langsung mengirim ACK.", evt.EventID)
+		d.Ack(false)
+		return
+	}
+
+	// 2. Eksekusi Logika Bisnis & Skenario Kompensasi Stok Kosong (Langkah 2.4)
+	log.Printf("[Business Logic] Memproses stok resep untuk Event ID: %s", evt.EventID)
+
+	for _, item := range evt.Payload.Prescription.Items {
+		if item.DrugCode == "MED-AMX-500" {
+			// Simulasi stok fisik MED-AMX-500 di gudang kosong (0)
+			log.Printf("[Pharmacy Warning] Stok fisik obat %s di gudang KOSONG (0)!", item.DrugCode)
+			log.Printf("[Compensation Publisher] Menerbitkan event balasan 'medcore.event.pharmacy.stock.exhausted' ke Exchange...")
+
+			compEvent := StockExhaustedEvent{
+				EventName:     "medcore.event.pharmacy.stock.exhausted",
+				AppointmentID: evt.Payload.AppointmentID,
+				DrugCode:      item.DrugCode,
+				Reason:        "STOCK_EXHAUSTED_IN_WAREHOUSE",
+				OccurredAt:    time.Now().UTC().Format(time.RFC3339),
+			}
+
+			body, _ := json.Marshal(compEvent)
+			errPub := ch.PublishWithContext(
+				ctx,
+				"medcore.clinical.events",                // Exchange tujuan
+				"medcore.event.pharmacy.stock.exhausted", // Routing Key kompensasi
+				false,
+				false,
+				amqp.Publishing{
+					DeliveryMode: amqp.Persistent,
+					ContentType:  "application/json",
+					Body:         body,
+				},
+			)
+			if errPub != nil {
+				log.Printf("[Error] Gagal menerbitkan event kompensasi: %v", errPub)
+			} else {
+				log.Printf("[Compensation Publisher] Berhasil menerbitkan event kompensasi untuk Appointment ID: %s", evt.Payload.AppointmentID)
+			}
+		}
+	}
+
+	// 3. Catat Event ID ke database riwayat proses (Atomic Insert)
+	_, err = eventColl.InsertOne(ctx, ProcessedEventRecord{
+		EventID:     evt.EventID,
+		ProcessedAt: time.Now(),
+		Status:      "COMPENSATED_OUT_OF_STOCK",
+	})
+	if err != nil {
+		log.Printf("[Error] Gagal mencatat deduplikasi: %v. Requeue pesan.", err)
+		d.Nack(false, true)
+		return
+	}
+
+	d.Ack(false)
+	log.Printf("[Pharmacy Consumer] Transaksi selesai sempurna dan Event %s dicatat.", evt.EventID)
 }
