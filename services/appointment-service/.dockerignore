@@ -1,0 +1,17 @@
+# File: .dockerignore (Berlaku seragam untuk seluruh service)
+
+.git
+.gitignore
+*.md
+node_modules
+dist
+npm-debug.log
+bin
+*.exe
+*.test
+.env
+.env.*
+Dockerfile*
+docker-compose*
+tests
+coverage
