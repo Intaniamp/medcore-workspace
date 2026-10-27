@@ -1,0 +1,218 @@
+version: '3.8' 
+
+networks: 
+  medcore-net: 
+    name: medcore-net 
+    driver: bridge 
+    ipam: 
+      config: 
+        - subnet: 172.28.0.0/16 
+ 
+volumes: 
+  patient_db_vol: 
+  appointment_db_vol: 
+  pharmacy_db_vol: 
+  billing_db_vol: 
+  rabbitmq_data: 
+ 
+services: 
+  # ============================================================================ 
+  # 1. BACKING SERVICES LAYER (DATABASES & BROKER) 
+  # ============================================================================ 
+  patient-db: 
+    image: postgres:16-alpine 
+    container_name: medcore-patient-db 
+    environment: 
+      POSTGRES_USER: ${PATIENT_DB_USER:-usr_patient_svc} 
+      POSTGRES_PASSWORD: ${PATIENT_DB_PASS:-SecuredPassPatient2026!} 
+      POSTGRES_DB: ${PATIENT_DB_NAME:-medcore_patient_db} 
+    ports: 
+      - "${HOST_PORT_PATIENT_DB:-5432}:5432" 
+    volumes: 
+      - ./services/patient-service/ddl/init.sql:/docker-entrypoint-initdb.d/init.sql:ro 
+      - patient_db_vol:/var/lib/postgresql/data 
+    networks: 
+      medcore-net: 
+        ipv4_address: 172.28.0.11 
+    healthcheck: 
+      test: ["CMD-SHELL", "pg_isready -U usr_patient_svc -d medcore_patient_db"] 
+      interval: 5s 
+      timeout: 5s 
+      retries: 5 
+      start_period: 10s 
+ 
+  appointment-db: 
+    image: postgres:16-alpine 
+    container_name: medcore-appointment-db 
+    environment: 
+      POSTGRES_USER: ${APPOINTMENT_DB_USER:-usr_appointment_svc} 
+      POSTGRES_PASSWORD: ${APPOINTMENT_DB_PASS:-SecuredPassAppt2026!} 
+      POSTGRES_DB: ${APPOINTMENT_DB_NAME:-medcore_appointment_db} 
+    ports: 
+      - "${HOST_PORT_APPOINTMENT_DB:-5433}:5432" 
+    volumes: 
+      - ./services/appointment-service/ddl/init.sql:/docker-entrypoint-initdb.d/init.sql:ro 
+      - appointment_db_vol:/var/lib/postgresql/data 
+    networks: 
+      medcore-net: 
+        ipv4_address: 172.28.0.12 
+    healthcheck: 
+      test: ["CMD-SHELL", "pg_isready -U usr_appointment_svc -d medcore_appointment_db"] 
+      interval: 5s 
+      timeout: 5s 
+      retries: 5 
+      start_period: 10s 
+ 
+  pharmacy-db: 
+    image: mongo:7.0-jammy 
+    container_name: medcore-pharmacy-db 
+    environment: 
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-adm_pharmacy_svc} 
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASS:-SecuredPassPharm2026!} 
+      MONGO_INITDB_DATABASE: ${PHARMACY_DB_NAME:-medcore_pharmacy_db} 
+    ports: 
+      - "${HOST_PORT_PHARMACY_DB:-27017}:27017" 
+    volumes: 
+      - ./services/pharmacy-service/ddl/init.js:/docker-entrypoint-initdb.d/init.js:ro 
+      - pharmacy_db_vol:/data/db 
+    networks: 
+      medcore-net: 
+        ipv4_address: 172.28.0.13 
+    healthcheck: 
+      test: ["CMD", "mongosh", "--quiet", "127.0.0.1:27017/test", "--eval", "db.runCommand('ping').ok"] 
+      interval: 5s 
+      timeout: 5s 
+      retries: 5 
+      start_period: 10s 
+ 
+  billing-db: 
+    image: mysql:8.0-debian 
+    container_name: medcore-billing-db 
+    command: --default-authentication-plugin=mysql_native_password 
+    environment: 
+      MYSQL_ROOT_PASSWORD: RootMasterSecurity2026! 
+      MYSQL_DATABASE: ${BILLING_DB_NAME:-medcore_billing_db} 
+      MYSQL_USER: ${BILLING_DB_USER:-usr_billing_svc} 
+      MYSQL_PASSWORD: ${BILLING_DB_PASS:-SecuredPassBilling2026!} 
+    ports: 
+      - "${HOST_PORT_BILLING_DB:-3306}:3306" 
+    volumes: 
+      - ./services/billing-service/ddl/init.sql:/docker-entrypoint-initdb.d/init.sql:ro 
+      - billing_db_vol:/var/lib/mysql 
+    networks: 
+      medcore-net: 
+        ipv4_address: 172.28.0.14 
+    healthcheck: 
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u usr_billing_svc -pSecuredPassBilling2026!"] 
+      interval: 5s 
+      timeout: 5s 
+      retries: 5 
+      start_period: 15s 
+ 
+  message-broker: 
+    image: rabbitmq:3.13-management-alpine 
+    container_name: medcore-message-broker 
+    environment: 
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-admin_medcore} 
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-SecuredPassRabbit2026!} 
+      RABBITMQ_DEFAULT_VHOST: /medcore_vhost 
+    ports: 
+      - "5672:5672" 
+      - "15672:15672" 
+    volumes: 
+      - rabbitmq_data:/var/lib/rabbitmq 
+    networks: 
+      medcore-net: 
+        ipv4_address: 172.28.0.20 
+    healthcheck: 
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"] 
+      interval: 10s 
+      timeout: 5s 
+      retries: 5 
+      start_period: 15s 
+ 
+  # ============================================================================ 
+  # 2. APPLICATION SERVICES LAYER 
+  # ============================================================================ 
+  patient-service: 
+    build: 
+      context: ./services/patient-service 
+      dockerfile: Dockerfile 
+    container_name: medcore-patient-service 
+    environment: 
+      PORT: 3000 
+      DATABASE_URL: postgres://usr_patient_svc:SecuredPassPatient2026!@patient-db:5432/medcore_patient_db 
+    ports: 
+      - "3000:3000" 
+    networks: 
+      medcore-net: 
+        ipv4_address: 172.28.0.2 
+    depends_on: 
+      patient-db: 
+        condition: service_healthy 
+    restart: on-failure 
+ 
+  appointment-service: 
+    build: 
+      context: ./services/appointment-service 
+      dockerfile: Dockerfile 
+    container_name: medcore-appointment-service 
+    environment: 
+      PORT: 8080 
+      DATABASE_URL: postgres://usr_appointment_svc:SecuredPassAppt2026!@appointment-db:5432/medcore_appointment_db 
+      RABBITMQ_URI: amqp://admin_medcore:SecuredPassRabbit2026!@message-broker:5672/medcore_vhost 
+      PHARMACY_GRPC_HOST: pharmacy-service:50051 
+    ports: 
+      - "8080:8080" 
+    networks: 
+      medcore-net: 
+        ipv4_address: 172.28.0.3 
+    depends_on: 
+      appointment-db: 
+        condition: service_healthy 
+      message-broker: 
+        condition: service_healthy 
+      pharmacy-service: 
+        condition: service_started 
+    restart: on-failure 
+ 
+  pharmacy-service: 
+    build: 
+      context: ./services/pharmacy-service 
+      dockerfile: Dockerfile 
+    container_name: medcore-pharmacy-service 
+    environment: 
+      GRPC_PORT: 50051 
+      REST_PORT: 8081 
+      MONGO_URI: mongodb://adm_pharmacy_svc:SecuredPassPharm2026!@pharmacy-db:27017/medcore_pharmacy_db?authSource=admin 
+      RABBITMQ_URI: amqp://admin_medcore:SecuredPassRabbit2026!@message-broker:5672/medcore_vhost 
+    ports: 
+      - "50051:50051" 
+      - "8081:8081" 
+    networks: 
+      medcore-net: 
+        ipv4_address: 172.28.0.4 
+    depends_on: 
+      pharmacy-db: 
+        condition: service_healthy 
+      message-broker: 
+        condition: service_healthy 
+    restart: on-failure 
+
+  billing-service: 
+    build: 
+      context: ./services/billing-service 
+      dockerfile: Dockerfile 
+    container_name: medcore-billing-service 
+    environment: 
+      DATABASE_URL: usr_billing_svc:SecuredPassBilling2026!@tcp(billing-db:3306)/medcore_billing_db?parseTime=true 
+      RABBITMQ_URI: amqp://admin_medcore:SecuredPassRabbit2026!@message-broker:5672/medcore_vhost 
+    networks: 
+      medcore-net: 
+        ipv4_address: 172.28.0.5 
+    depends_on: 
+      billing-db: 
+        condition: service_healthy 
+      message-broker: 
+        condition: service_healthy 
+    restart: on-failure
