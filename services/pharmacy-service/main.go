@@ -7,6 +7,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	pb "pharmacy-service/pb"
@@ -31,6 +33,13 @@ type DrugDoc struct {
 	Name       string  `bson:"name"`
 	UnitPrice  float64 `bson:"unit_price"`
 	TotalStock int32   `bson:"total_stock"`
+}
+
+func normalizeAMQPURI(uri string) string {
+	if strings.HasSuffix(uri, "/medcore_vhost") && !strings.HasSuffix(uri, "/%2Fmedcore_vhost") && !strings.HasSuffix(uri, "//medcore_vhost") {
+		return strings.TrimSuffix(uri, "/medcore_vhost") + "/%2Fmedcore_vhost"
+	}
+	return uri
 }
 
 func (s *server) CheckDrugAvailability(ctx context.Context, req *pb.CheckDrugRequest) (*pb.CheckDrugResponse, error) {
@@ -73,32 +82,43 @@ func (s *server) CheckDrugAvailability(ctx context.Context, req *pb.CheckDrugReq
 }
 
 func main() {
-	amqpURI := "amqp://admin_medcore:SecuredPassRabbit2026!@localhost:5672/%2Fmedcore_vhost"
+	amqpURI := os.Getenv("RABBITMQ_URI")
+	if amqpURI == "" {
+		amqpURI = "amqp://admin_medcore:SecuredPassRabbit2026!@localhost:5672/%2Fmedcore_vhost"
+	}
+	amqpURI = normalizeAMQPURI(amqpURI)
 
 	// Koneksi ke MongoDB kontainer
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	mongoURI :=
-		"mongodb://adm_pharmacy_svc:SecuredPassPharm2026!@localhost:27017/medcore_pharmacy_db?authSource=admin"
+	mongoURI := os.Getenv("MONGO_URI")
+	if mongoURI == "" {
+		mongoURI = "mongodb://adm_pharmacy_svc:SecuredPassPharm2026!@localhost:27017/medcore_pharmacy_db?authSource=admin"
+	}
 	client, err := mongo.Connect(ctx, options.Client().ApplyURI(mongoURI))
 	if err != nil {
 		log.Fatalf("Gagal terhubung ke MongoDB: %v", err)
 	}
 
-	consumer.StartPrescriptionConsumer(amqpURI, client)
+	go consumer.StartPrescriptionConsumer(amqpURI, client)
 	go startRESTServer(client)
 
-	lis, err := net.Listen("tcp", ":50051")
+	grpcPort := os.Getenv("GRPC_PORT")
+	if grpcPort == "" {
+		grpcPort = "50051"
+	}
+
+	lis, err := net.Listen("tcp", ":"+grpcPort)
 	if err != nil {
-		log.Fatalf("Gagal membuka port 50051: %v", err)
+		log.Fatalf("Gagal membuka port %s: %v", grpcPort, err)
 	}
 
 	s := grpc.NewServer()
 	pb.RegisterPharmacyServiceServer(s, &server{mongoClient: client})
 
 	log.Println("==================================================")
-	log.Println("MedCore Pharmacy gRPC Service aktif pada port :50051")
+	log.Printf("MedCore Pharmacy gRPC Service aktif pada port :%s", grpcPort)
 	log.Println("==================================================")
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("Gagal menjalankan gRPC server: %v", err)
@@ -106,8 +126,13 @@ func main() {
 }
 
 func startRESTServer(mongoClient *mongo.Client) {
+	restPort := os.Getenv("REST_PORT")
+	if restPort == "" {
+		restPort = "8081"
+	}
+
 	http.HandleFunc("/api/v1/drugs/check", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
 			http.Error(w, "Metode not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -134,6 +159,6 @@ func startRESTServer(mongoClient *mongo.Client) {
 		})
 	})
 
-	log.Println("MedCore Pharmacy REST API aktif pada port :8081")
-	http.ListenAndServe(":8081", nil)
+	log.Printf("MedCore Pharmacy REST API aktif pada port :%s", restPort)
+	http.ListenAndServe(":"+restPort, nil)
 }
